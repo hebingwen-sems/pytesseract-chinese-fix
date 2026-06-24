@@ -3,6 +3,7 @@
 """
 Pytesseract 中文 OCR 修复模块
 自动检测并安装 chi_sim 中文语言包，解决中文识别乱码问题
+支持 Tesseract v4/v5 及 Windows/macOS/Linux
 """
 
 import os
@@ -40,12 +41,13 @@ def get_tesseract_path():
 
 
 def get_tessdata_dir():
-    """获取 tessdata 目录路径"""
+    """获取 tessdata 目录路径（支持 v4/v5）"""
     tesseract_path = get_tesseract_path()
     if not tesseract_path:
         return None
     
     # 尝试通过 tesseract --list-langs 获取 tessdata 路径
+    # 输出格式: List of available languages in "/usr/share/tesseract-ocr/5/tessdata/"
     try:
         result = subprocess.run(
             [tesseract_path, "--list-langs"],
@@ -53,11 +55,8 @@ def get_tessdata_dir():
             text=True,
             timeout=10
         )
-        # 第一行通常包含 tessdata 路径信息
-        # 例如: List of available languages in "/usr/share/tessdata/"
-        for line in result.stderr.split('\n'):
+        for line in (result.stdout + result.stderr).split('\n'):
             if 'tessdata' in line:
-                # 提取路径
                 start = line.find('"') + 1
                 end = line.rfind('"')
                 if start > 0 and end > start:
@@ -65,7 +64,7 @@ def get_tessdata_dir():
     except Exception:
         pass
     
-    # 常见 tessdata 路径
+    # 常见 tessdata 路径（覆盖 v4/v5 及多平台）
     system = platform.system()
     possible_dirs = []
     
@@ -82,9 +81,10 @@ def get_tessdata_dir():
             "/opt/homebrew/share/tessdata",
             "/usr/share/tessdata",
         ]
-    else:  # Linux
+    else:  # Linux - 支持 v4 和 v5
         possible_dirs = [
-            "/usr/share/tesseract-ocr/4.00/tessdata",
+            "/usr/share/tesseract-ocr/5/tessdata",   # Ubuntu 22.04+ / Debian 12+
+            "/usr/share/tesseract-ocr/4.00/tessdata", # 旧版本
             "/usr/share/tessdata",
             "/usr/local/share/tessdata",
         ]
@@ -122,7 +122,7 @@ def get_installed_languages():
             timeout=10
         )
         languages = []
-        for line in result.stdout.split('\n') + result.stderr.split('\n'):
+        for line in (result.stdout + result.stderr).split('\n'):
             line = line.strip()
             if line and not line.startswith('List') and not line.startswith('Error'):
                 languages.append(line)
@@ -145,10 +145,11 @@ def download_chi_sim():
     # 确保 tessdata 目录存在
     os.makedirs(tessdata_dir, exist_ok=True)
     
-    # GitHub 官方语言包下载地址
+    # GitHub 官方语言包下载地址（支持镜像加速）
     download_urls = [
         "https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata",
         "https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/chi_sim.traineddata",
+        "https://ghproxy.com/https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata",
     ]
     
     output_path = os.path.join(tessdata_dir, "chi_sim.traineddata")
@@ -158,7 +159,7 @@ def download_chi_sim():
     
     for url in download_urls:
         try:
-            print(f"[信息] 尝试从 {url} 下载...")
+            print(f"[信息] 尝试从 {url[:60]}... 下载")
             
             # 创建请求（添加 User-Agent 避免被 GitHub 拒绝）
             req = urllib.request.Request(
@@ -168,15 +169,27 @@ def download_chi_sim():
                 }
             )
             
-            # 下载文件
-            with urllib.request.urlopen(req, timeout=120) as response:
+            # 下载文件（支持大文件分块写入）
+            with urllib.request.urlopen(req, timeout=300) as response:
                 if response.status == 200:
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    downloaded = 0
+                    chunk_size = 256 * 1024  # 256KB chunks
+                    
                     with open(output_path, 'wb') as f:
-                        f.write(response.read())
+                        while True:
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"\r       进度: {percent:.1f}%", end='', flush=True)
                     
                     # 验证文件大小（正常应该 > 10MB）
                     file_size = os.path.getsize(output_path)
-                    print(f"[成功] 下载完成！文件大小: {file_size / 1024 / 1024:.2f} MB")
+                    print(f"\n[成功] 下载完成！文件大小: {file_size / 1024 / 1024:.2f} MB")
                     
                     if file_size < 1024 * 1024:  # 小于 1MB 可能下载失败
                         print("[警告] 文件大小异常，可能下载不完整")
@@ -188,7 +201,7 @@ def download_chi_sim():
                     print(f"[错误] HTTP 状态码: {response.status}")
                     
         except Exception as e:
-            print(f"[错误] 从该地址下载失败: {e}")
+            print(f"[错误] 下载失败: {str(e)[:80]}")
             continue
     
     print("[失败] 所有下载地址均失败")
@@ -296,17 +309,17 @@ def main():
     
     # 4. 检查 chi_sim
     if check_chi_sim_installed():
-        print("\n[成功] chi_sim (中文简体) 语言包已安装！")
+        print("\n[✓] chi_sim (中文简体) 语言包已安装！")
         print("       你现在可以使用 lang='chi_sim' 进行中文 OCR 了")
     else:
-        print("\n[警告] chi_sim (中文简体) 语言包未安装！")
+        print("\n[✗] chi_sim (中文简体) 语言包未安装！")
         print("[信息] 正在尝试自动安装...")
         
         if download_chi_sim():
-            print("\n[成功] chi_sim 语言包安装完成！")
+            print("\n[✓] chi_sim 语言包安装完成！")
             print("       请重新运行此脚本验证")
         else:
-            print("\n[失败] 自动安装失败")
+            print("\n[✗] 自动安装失败")
             print("[手动安装指南]")
             print("1. 访问 https://github.com/tesseract-ocr/tessdata")
             print("2. 下载 chi_sim.traineddata 文件")
@@ -320,7 +333,7 @@ def main():
     print("\n[检查] 验证 Python 环境...")
     pytesseract = setup_pytesseract_for_chinese()
     if pytesseract:
-        print("[成功] pytesseract 模块可正常使用")
+        print("[✓] pytesseract 模块可正常使用")
         
         # 显示使用示例
         print("\n" + "=" * 60)
